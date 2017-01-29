@@ -1,231 +1,281 @@
+--[[
+    Copyright 2017 wrxck <matthew@matthewhesketh.com>
+    This code is licensed under the MIT. See LICENSE for details.
+]]--
+
 local plugins = {}
+
 local mattata = require('mattata')
-local redis = require('mattata-redis')
 local json = require('dkjson')
+local redis = require('mattata-redis')
 local configuration = require('configuration')
 
 function plugins:init(configuration)
-	plugins.arguments = 'plugins <enable/disable> <plugin>'
-	plugins.commands = mattata.commands(self.info.username, configuration.commandPrefix):command('plugins').table
-	plugins.help = configuration.commandPrefix .. 'plugins enable <plugin> - enable one of ' .. self.info.first_name .. '\'s plugins in your group.\n' .. configuration.commandPrefix .. 'plugins disable <plugin> - disable one of ' .. self.info.first_name .. '\'s plugins in your group.\n' .. configuration.commandPrefix .. 'plugins enable all - enable all of ' .. self.info.first_name .. '\'s non-core plugins in your group.\n' .. configuration.commandPrefix .. 'plugins disabl eall - disable all of' .. self.info.first_name ..  '\'s non-core plugins in your group.\n' .. configuration.commandPrefix .. 'plugins list - list all available plugins.'
+    plugins.arguments = 'plugins'
+    plugins.commands = mattata.commands(
+        self.info.username,
+        configuration.command_prefix
+    ):command('plugins').table
+    plugins.help = '/plugins - Toggle the plugins you want to use in your chat with a slick inline keyboard, paginated and neatly formatted.'
 end
 
-local corePlugins = {
-	'lua',
-	'shell',
-	'plugins',
-	'control',
-	'help',
-	'ping',
-	'setlang',
-	'setloc'
-}
-
-function plugins:pluginExists(plugin)
-	for k, v in pairs(corePlugins) do
-		if plugin == v then
-			return false
-		end
-	end
-	for k, v in pairs(configuration.plugins) do
-		if v == plugin then
-			return true
-		end
-	end
-	for k, v in pairs(configuration.administration) do
-		if v == plugin then
-			return true
-		end
-	end
-	if plugin == 'ai' or plugin == 'telegram' then
-		return true
-	end
-	return false
+function plugins.get_toggleable_plugins()
+    local toggleable = {}
+    for k, v in pairs(configuration.plugins) do
+        if v ~= 'plugins' and v ~= 'administration' and v ~= 'control' and v ~= 'bash' and v ~= 'lua' and v ~= 'gwhitelist' and v ~= 'gblacklist' then
+            table.insert(
+                toggleable,
+                v
+            )
+        end
+    end
+    local extra_plugins = {
+        'ai',
+        'captionbotai'
+    }
+    for k, v in pairs(extra_plugins) do
+        table.insert(
+            toggleable,
+            v
+        )
+    end
+    table.sort(toggleable)
+    return toggleable
 end
 
-function plugins:disableAllAdministrationPlugins(message)
-	for k, v in pairs(configuration.administration) do
-		if plugins:pluginExists(v) then
-			local hash = 'chat:' .. message.chat.id .. ':disabledPlugins'
-			if redis:hget(hash, v) ~= 'true' then
-				redis:hset(hash, v, true)
-			end
-		end
-	end
-	plugins:reloadPlugins(self)
-	return 'Success! Use \'' .. configuration.commandPrefix .. 'plugins enable administration\' to enable all of my administration plugins, or use \'' .. configuration.commandPrefix .. 'plugins enable <plugin>\' to enable plugins individually.'
+function plugins.get_keyboard(user_id, chat, page, columns, per_page)
+    page = page or 1
+    local toggleable = plugins.get_toggleable_plugins()
+    local page_count = math.floor(#toggleable / per_page)
+    if page_count < #toggleable / per_page then
+        page_count = page_count + 1
+    end
+    if page < 1 then
+        page = page_count
+    elseif page > page_count then
+        page = 1
+    end
+    local start_res = (page * per_page) - (per_page - 1)
+    local end_res = start_res + (per_page - 1)
+    if end_res > #toggleable then
+        end_res = #toggleable
+    end
+    local plugin = 0
+    local output = {}
+    for k, v in pairs(toggleable) do
+        plugin = plugin + 1
+        if plugin >= start_res and plugin <= end_res then
+            local status = ''
+            if not mattata.is_plugin_disabled(
+                v,
+                chat
+            ) then
+                status = '✅'
+            else
+                status = '❌'
+            end
+            table.insert(
+                output,
+                {
+                    ['plugin'] = v,
+                    ['status'] = status
+                }
+            )
+        end
+    end
+    local keyboard = {
+        ['inline_keyboard'] = {
+            {}
+        }
+    }
+    local columns_per_page = math.floor(#output / columns)
+    if columns_per_page < (#output / columns) then
+        columns_per_page = columns_per_page + 1
+    end
+    local rows_per_page = math.floor(#output / columns_per_page)
+    if rows_per_page < (#output / columns_per_page) then
+        rows_per_page = rows_per_page + 1
+    end
+    local current_row = 1
+    local count = 0
+    for n in pairs(output) do
+        count = count + 1
+        if count == (rows_per_page * current_row) + 1 then
+            current_row = current_row + 1
+            table.insert(
+                keyboard.inline_keyboard,
+                {}
+            )
+        end
+        table.insert(
+            keyboard.inline_keyboard[current_row],
+            {
+                ['text'] = output[n].plugin,
+                ['callback_data'] = 'plugins:' .. chat .. ':' .. output[n].plugin .. ':' .. page
+            }
+        )
+        table.insert(
+            keyboard.inline_keyboard[current_row],
+            {
+                ['text'] = output[n].status,
+                ['callback_data'] = 'plugins:' .. chat .. ':' .. output[n].plugin .. ':' .. page
+            }
+        )
+    end
+    table.insert(
+        keyboard.inline_keyboard,
+        {
+            {
+                ['text'] = '← Previous',
+                ['callback_data'] = 'plugins:' .. chat .. ':page:' .. page - 1
+            },
+            {
+                ['text'] = page .. '/' .. page_count,
+                ['callback_data'] = 'plugins:nil'
+            },
+            {
+                ['text'] = 'Next →',
+                ['callback_data'] = 'plugins:' .. chat .. ':page:' .. page + 1
+            }
+        }
+    )
+    table.insert(
+        keyboard.inline_keyboard,
+        {
+            {
+                ['text'] = 'Disable All',
+                ['callback_data'] = 'plugins:' .. chat .. ':disable_all:' .. page
+            },
+            {
+                ['text'] = 'Enable All',
+                ['callback_data'] = 'plugins:' .. chat .. ':enable_all:' .. page
+            }
+        }
+    )
+    return keyboard
 end
 
-function plugins:enableAllAdministrationPlugins(message)
-	for k, v in pairs(configuration.administration) do
-		local hash = 'chat:' .. message.chat.id .. ':disabledPlugins'
-		local disabled = redis:hget(hash, v)
-		if disabled ~= 'false' then
-			redis:hset(hash, v, false)
-		end
-	end
-	plugins:reloadPlugins(self)
-	return 'Success! Use \'' .. configuration.commandPrefix .. 'plugins disable administration\' to disable all of my administration plugins, or use \'' .. configuration.commandPrefix .. 'plugins disable <plugin>\' to disable plugins individually.'
+function plugins:on_callback_query(callback_query, message, configuration)
+    if not callback_query.data:match('^.-%:.-%:.-$') then
+        return
+    end
+    local chat, callback_type, page = callback_query.data:match('^(.-)%:(.-)%:(.-)$')
+    if not mattata.is_group_admin(
+        chat,
+        callback_query.from.id
+    ) then
+        return mattata.answer_callback_query(
+            callback_query.id,
+            'You must be an administrator to use this!'
+        )
+    end
+    local toggle_status = 'toggled!'
+    if callback_type ~= 'page' then
+        local toggleable = plugins.get_toggleable_plugins()
+        if callback_type == 'enable_all' then
+            for k, v in pairs(toggleable) do
+                redis:hset(
+                    'chat:' .. chat .. ':disabled_plugins',
+                    v,
+                    false
+                )
+            end
+            toggle_status = 'enabled!'
+        elseif callback_type == 'disable_all' then
+            for k, v in pairs(toggleable) do
+                redis:hset(
+                    'chat:' .. chat .. ':disabled_plugins',
+                    v,
+                    true
+                )
+            end
+            toggle_status = 'disabled!'
+        elseif callback_type == 'enable_via_message' then
+            redis:hset(
+                'chat:' .. chat .. ':disabled_plugins',
+                page,
+                false
+            )
+            return mattata.answer_callback_query(
+                callback_query.id,
+                page:gsub('^%l', string.upper) .. ' has been enabled!'
+            )
+        elseif callback_type == 'dismiss_disabled_message' then
+            redis:set(
+                'chat:' .. chat .. ':dismiss_disabled_message:' .. page,
+                true
+            )
+            return mattata.answer_callback_query(
+                callback_query.id,
+                'You will no longer be notified about this plugin!'
+            )
+        else
+            if mattata.is_plugin_disabled(
+                callback_type,
+                chat
+            ) then
+                redis:hset(
+                    'chat:' .. chat .. ':disabled_plugins',
+                    callback_type,
+                    false
+                )
+            else
+                redis:hset(
+                    'chat:' .. chat .. ':disabled_plugins',
+                    callback_type,
+                    true
+                )
+            end
+        end
+    end
+    local keyboard = plugins.get_keyboard(callback_query.from.id, chat, tonumber(page), 2, 20)
+    local success = mattata.edit_message_reply_markup(
+        message.chat.id,
+        message.message_id,
+        nil,
+        json.encode(keyboard)
+    )
+    if not success then
+        return mattata.answer_callback_query(
+            callback_query.id,
+            'All plugins have already been ' .. toggle_status
+        )
+    end
 end
 
-function plugins:isPluginEnabled(self, plugin)
-	for k, v in pairs(enabledPlugins) do
-		if plugin == v then
-			return k
-		end
-	end
-	return false
-end
-
-function plugins:reloadPlugins(self, plugin, status)
-	for pac, _ in pairs(package.loaded) do
-		if pac:match('^plugins%.') then
-			package.loaded[pac] = nil
-		end
-	end
-	package.loaded['mattata'] = nil
-	package.loaded['configuration'] = nil
-	mattata.init(self, configuration)
-	if plugin then
-		return 'The plugin \'' .. plugin .. '\' is now ' .. status
-	end
-	return
-end
-
-function plugins:enablePlugin(message, plugin)
-	if not plugins:pluginExists(plugin) then
-		return 'The plugin \'' .. plugin .. '\' doesn\'t exist!'
-	end
-	local hash = 'chat:' .. message.chat.id .. ':disabledPlugins'
-	if redis:hget(hash, plugin) == 'true' then
-		redis:hset(hash, plugin, false)
-		plugins:reloadPlugins(self)
-		return 'The plugin \'' .. plugin .. '\' has been️ enabled in this chat.'
-	end
-	plugins:reloadPlugins(self)
-	return 'The plugin \'' .. plugin .. '\' has already been enabled in this chat!'
-end
-
-function plugins:disablePlugin(message, plugin)
-	if not plugins:pluginExists(plugin) then
-		return 'The plugin \'' .. plugin .. '\' doesn\'t exist!'
-	end
-	local hash = 'chat:' .. message.chat.id .. ':disabledPlugins'
-	if redis:hget(hash, plugin) ~= 'true' then
-		redis:hset(hash, plugin, true)
-		plugins:reloadPlugins(self)
-		return 'The plugin \'' .. plugin .. '\' has been️ disabled in this chat.'
-	end
-	plugins:reloadPlugins(self)
-	return 'The plugin \'' .. plugin .. '\' has already been disabled in this chat!'
-end
-
-function plugins:disableAllPlugins(message)
-	for k, v in pairs(configuration.plugins) do
-		if plugins:pluginExists(v) then
-			local hash = 'chat:' .. message.chat.id .. ':disabledPlugins'
-			if redis:hget(hash, v) ~= 'true' then
-				redis:hset(hash, v, true)
-			end
-		end
-	end
-	plugins:reloadPlugins(self)
-	return 'Success! Use \'' .. configuration.commandPrefix .. 'plugins enable all\' to enable all of my plugins, or use \'' .. configuration.commandPrefix .. 'plugins enable <plugin>\' to enable plugins individually.'
-end
-
-function plugins:listDisabledPlugins(message)
-	local disabledPluginList = {}
-	local disabledPluginCount = 0
-	for k, v in pairs(configuration.plugins) do
-		local hash = 'chat:' .. message.chat.id .. ':disabledPlugins'
-		if redis:hget(hash, v) == 'true' then
-			table.insert(disabledPluginList, v)
-			disabledPluginCount = disabledPluginCount + 1
-		end
-	end
-	if disabledPluginCount == 0 then
-		return 'You haven\'t disabled any plugins in this chat!'
-	end
-	table.sort(disabledPluginList)
-	return 'The following plugins are disabled in this chat:\n' .. table.concat(disabledPluginList, ', ')
-end
-
-function plugins:listEnabledPlugins(message)
-	local enabledPluginList = {}
-	local enabledPluginCount = 0
-	for k, v in pairs(configuration.plugins) do
-		local hash = 'chat:' .. message.chat.id .. ':disabledPlugins'
-		if redis:hget(hash, v) ~= 'true' and plugins:pluginExists(v) then
-			table.insert(enabledPluginList, v)
-			enabledPluginCount = enabledPluginCount + 1
-		end
-	end
-	if enabledPluginCount == 0 then
-		return 'You haven\'t enabled any plugins in this chat!'
-	end
-	table.sort(enabledPluginList)
-	return 'The following plugins are enabled in this chat:\n' .. table.concat(enabledPluginList, ', ')
-end
-
-function plugins:enableAllPlugins(message)
-	for k, v in pairs(configuration.plugins) do
-		local hash = 'chat:' .. message.chat.id .. ':disabledPlugins'
-		local disabled = redis:hget(hash, v)
-		if disabled ~= 'false' then
-			redis:hset(hash, v, false)
-		end
-	end
-	plugins:reloadPlugins(self)
-	return 'Success! Use \'' .. configuration.commandPrefix .. 'plugins disable all\' to disable all plugins, or use \'' .. configuration.commandPrefix .. 'plugins disable <plugin>\' to disable plugins individually.'
-end
-
-function plugins:onMessage(message, configuration)
-	if message.chat.type == 'private' then
-		mattata.sendMessage(message.chat.id, 'This command cannot be used in private chat.', nil, true, false, message.message_id)
-		return
-	elseif not mattata.isGroupAdmin(message.chat.id, message.from.id) and not mattata.isConfiguredAdmin(message.from.id) then
-		mattata.sendMessage(message.chat.id, 'You must be an administrator of this chat in order to be able to use this command!', nil, true, false, message.message_id)
-		return
-	end
-	if message.text_lower:match('^' .. configuration.commandPrefix .. 'plugins$') or message.text_lower:match('^' .. configuration.commandPrefix .. 'plugins@' .. self.info.username .. '$') then
-		mattata.sendMessage(message.chat.id, '<b>Hello, ' .. mattata.htmlEscape(message.from.first_name) .. '!</b>\n\nTo disable a specific plugin, use \'' .. configuration.commandPrefix .. 'plugins disable &lt;plugin&gt;\'. To enable a specific plugin, use \'' .. configuration.commandPrefix .. 'plugins enable &lt;plugin&gt;\'.\n\nFor the sake of convenience, you can enable all of my non-core plugins by using \'' .. configuration.commandPrefix .. 'plugins enable all\'. To disable all of my non-core plugins, you can use \'' .. configuration.commandPrefix .. 'plugins disable all\'.\n\nTo see a list of plugins you\'ve disabled, use \'' .. configuration.commandPrefix .. 'plugins disabled\'. For a list of plugins that can be toggled and haven\'t been disabled in this chat yet, use \'' .. configuration.commandPrefix .. 'plugins enabled\'.\n\nA list of all toggleable plugins can be viewed by using \'' .. configuration.commandPrefix .. 'plugins list\'.', 'HTML', true, false, message.message_id)
-		return
-	elseif message.text_lower:match('^' .. configuration.commandPrefix .. 'plugins enable %a+$') then
-		local plugin = message.text:gsub('^' .. configuration.commandPrefix .. 'plugins enable ', '')
-		local output
-		if plugin == 'all' then
-			output = plugins:enableAllPlugins(message)
-		elseif plugin == 'administration' then
-			output = plugins:enableAllAdministrationPlugins(message)
-		else
-			output = plugins:enablePlugin(message, plugin)
-		end
-		mattata.sendMessage(message.chat.id, output, nil, true, false, message.message_id)
-	elseif message.text_lower:match('^' .. configuration.commandPrefix .. 'plugins disable %a+$') then
-		local plugin = message.text:gsub('^' .. configuration.commandPrefix .. 'plugins disable ', '')
-		local output
-		if plugin:lower() == 'all' then
-			output = plugins:disableAllPlugins(message)
-		elseif plugin:lower() == 'administration' then
-			output = plugins:disableAllAdministrationPlugins(message)
-		else
-			output = plugins:disablePlugin(message, plugin)
-		end
-		mattata.sendMessage(message.chat.id, output, nil, true, false, message.message_id)
-	elseif message.text_lower:match('^' .. configuration.commandPrefix .. 'plugins disabled$') then
-		mattata.sendMessage(message.chat.id, plugins:listDisabledPlugins(message), nil, true, false, message.message_id)
-	elseif message.text_lower:match('^' .. configuration.commandPrefix .. 'plugins enabled$') then
-		mattata.sendMessage(message.chat.id, plugins:listEnabledPlugins(message), nil, true, false, message.message_id)
-	elseif message.text_lower:match('^' .. configuration.commandPrefix .. 'plugins list$') then
-		local pluginList = {}
-		for k, v in pairs(configuration.plugins) do
-			if plugins:pluginExists(v) then
-				table.insert(pluginList, v)
-			end
-		end
-		table.sort(pluginList)
-		mattata.sendMessage(message.chat.id, 'Toggleable plugins:\n' .. table.concat(pluginList, ', '), nil, true, false, message.message_id)
-	end
+function plugins:on_message(message, configuration)
+    if message.chat.type == 'private' then
+        return
+    elseif not mattata.is_group_admin(
+        message.chat.id,
+        message.from.id
+    ) then
+        return mattata.send_reply(
+            message,
+            'You must be an administrator to use this!'
+        )
+    end
+    local keyboard = plugins.get_keyboard(message.from.id, message.chat.id, 1, 2, 20)
+    local success = mattata.send_message(
+        message.from.id,
+        'Toggle the plugins for <b>' .. mattata.escape_html(message.chat.title) .. '</b> using the keyboard below:',
+        'html',
+        true,
+        false,
+        nil,
+        json.encode(keyboard)
+    )
+    if not success then
+        return mattata.send_reply(
+            message,
+            'I couldn\'t send you the plugin management menu, you need to send me a [private message](https://t.me/' .. configuration.info.username .. ') first, then try using /plugins again.',
+            'markdown'
+        )
+    end
+    return mattata.send_reply(
+        message,
+        'I have sent you the plugin management menu via private chat.'
+    )
 end
 
 return plugins
